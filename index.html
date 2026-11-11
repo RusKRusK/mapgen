@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WFCマップ</title>
+<link rel="stylesheet" href="src/style.css">
+</head>
+<body>
+<header id="bar">
+  <button id="bGen" title="G">生成</button>
+  <button id="bRegen">手動以外を再生成</button>
+  <button id="bFill" title="F">空きを埋める</button>
+  <button id="bClear">全消去</button>
+  <span class="sep"></span>
+  <label>シード <input id="seed" type="number" value="1" step="1"></label>
+  <label class="chk"><input id="seedLock" type="checkbox">固定</label>
+  <span class="sep"></span>
+  <label><input id="mapW" type="number" min="4" max="160" value="64"></label>×<label><input id="mapH" type="number" min="4" max="160" value="40"></label>
+  <button id="bResize">サイズ変更</button>
+  <span class="sep"></span>
+  <button id="bUndo" title="Ctrl+Z">↶</button>
+  <button id="bRedo" title="Ctrl+Y">↷</button>
+  <span class="sep"></span>
+  <button id="bZoomOut">−</button><span id="zoomLabel">100%</span><button id="bZoomIn">+</button>
+  <button id="bFit" title="H">全体</button>
+  <span class="sep"></span>
+  <label class="chk"><input id="optGrid" type="checkbox">グリッド</label>
+  <label class="chk"><input id="optCand" type="checkbox" checked>候補</label>
+  <label class="chk"><input id="optManual" type="checkbox">手動マーク</label>
+  <span class="sep"></span>
+  <button id="bPng">PNG</button>
+  <button id="bSave">保存</button>
+  <button id="bLoad">読込</button>
+  <input id="fileIn" type="file" accept=".json,application/json" hidden>
+</header>
+<div id="main">
+  <aside id="side">
+    <div id="palette"></div>
+    <hr>
+    <div class="params">
+      <label>まとまり <input id="pClump" type="range" min="0" max="4" step="0.1" value="1.5"><output></output></label>
+      <label>地形ノイズ <input id="pBias" type="range" min="0" max="3" step="0.1" value="1"><output></output></label>
+      <label>ノイズ尺度 <input id="pScale" type="range" min="0.4" max="3" step="0.1" value="1"><output></output></label>
+      <label class="chk"><input id="pBorder" type="checkbox" checked>外周を深海に</label>
+      <label class="chk"><input id="pAnim" type="checkbox" checked>生成を見せる</label>
+      <button id="bResetW">重みを戻す</button>
+    </div>
+  </aside>
+  <div id="view"><canvas id="cv"></canvas></div>
+</div>
+<footer id="status"><span id="stPos"></span><span id="stInfo"></span><span id="stCount"></span><span id="stMsg"></span></footer>
+<script src="tiles/terrains.js"></script>
+<script src="src/autotile.js"></script>
+<script src="src/wfc.js"></script>
+<script src="src/app.js"></script>
+</body>
+</html>
