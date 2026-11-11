@@ -394,19 +394,20 @@
       for (const i of cand) if (this.cells[i] < 0) this._pushHeap(i);
       // ノイズ誘導用のフィールド (標高・湿度・気温)
       if (this.opts.bias > 0) {
-        const s = this.opts.seed, sc = 7 / Math.max(this.W, this.H) / this.opts.scale;
+        const s = this.opts.noiseSeed ?? this.opts.seed, sc = 7 / Math.max(this.W, this.H) / this.opts.scale;
+        const offX = this.opts.offX || 0, offY = this.opts.offY || 0;
         this._E = new Float32Array(N);
         this._M = new Float32Array(N);
         this._Tp = new Float32Array(N);
-        for (let y = 0; y < this.H; y++)
-          for (let x = 0; x < this.W; x++) {
-            const i = y * this.W + x;
-            const e = fbm(x * sc, y * sc, s * 7 + 1, 5);
-            this._E[i] = Math.min(1, Math.max(0, (e - 0.5) * 3.0 + 0.36));
-            this._M[i] = Math.min(1, Math.max(0, (fbm(x * sc * 1.3 + 50, y * sc * 1.3, s * 7 + 2, 4) - 0.5) * 2.6 + 0.5));
-            const lat = 1 - Math.abs(y / Math.max(1, this.H - 1) - 0.5) * 2;
-            this._Tp[i] = Math.min(1, Math.max(0, lat * 0.55 + (fbm(x * sc + 90, y * sc, s * 7 + 3, 3) - 0.5) * 1.6 + 0.25));
-          }
+        for (const i of cand) {
+          const x = i % this.W, y = (i / this.W) | 0;
+          const wx = x + offX, wy = y + offY;
+          const e = fbm(wx * sc, wy * sc, s * 7 + 1, 5);
+          this._E[i] = Math.min(1, Math.max(0, (e - 0.5) * 3.0 + 0.36));
+          this._M[i] = Math.min(1, Math.max(0, (fbm(wx * sc * 1.3 + 50, wy * sc * 1.3, s * 7 + 2, 4) - 0.5) * 2.6 + 0.5));
+          const lt = wy / Math.max(1, this.H - 1), lat = 1 - Math.abs(lt - Math.floor(lt) - 0.5) * 2;
+          this._Tp[i] = Math.min(1, Math.max(0, lat * 0.55 + (fbm(wx * sc + 90, wy * sc, s * 7 + 3, 3) - 0.5) * 1.6 + 0.25));
+        }
       }
       this.running = true;
     }
@@ -508,6 +509,26 @@
     run(opts, region) {
       this.begin(opts, region);
       while (this.step(1e6));
+    }
+
+    /**
+     * 中身を (dx, dy) だけずらす (右矢印なら dx=1: 中身は左へ)。
+     * はみ出したセルは消え、空いたセルの一覧を返す。dirty は付けない。
+     */
+    shift(dx, dy) {
+      const W = this.W, H = this.H, c = new Int16Array(W * H).fill(-1), m = new Uint8Array(W * H), fresh = [];
+      for (let y = 0; y < H; y++)
+        for (let x = 0; x < W; x++) {
+          const sx = x + dx, sy = y + dy, i = y * W + x;
+          if (sx >= 0 && sy >= 0 && sx < W && sy < H) {
+            c[i] = this.cells[sy * W + sx];
+            m[i] = this.manual[sy * W + sx];
+          } else fresh.push(i);
+        }
+      this.cells = c;
+      this.manual = m;
+      this.recompute();
+      return fresh;
     }
 
     snapshot() {

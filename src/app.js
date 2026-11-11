@@ -387,8 +387,40 @@
     }
   }
 
+  // 矢印スクロールの状態。noise は進んだ分だけずらし、逆向きに戻ったら epoch を変えて別の景色にする
+  const scroll = { offX: 0, offY: 0, dirX: 0, dirY: 0, epoch: 0 };
   function params(seed) {
-    return { seed, clump: +P.clump.value, bias: +P.bias.value, scale: +P.scale.value };
+    return {
+      seed, clump: +P.clump.value, bias: +P.bias.value, scale: +P.scale.value,
+      noiseSeed: (+P.seed.value | 0) + scroll.epoch * 7919, offX: scroll.offX, offY: scroll.offY,
+    };
+  }
+
+  let tmpCv = null;
+  /** 矢印の向きへ1マス進む: はみ出したマスを消し、空いた列/行をWFCで生成 */
+  function scrollMap(dx, dy, record) {
+    stopGen();
+    if (record) pushUndo();
+    if ((dx && scroll.dirX === -dx) || (dy && scroll.dirY === -dy)) scroll.epoch++;
+    if (dx) scroll.dirX = dx;
+    if (dy) scroll.dirY = dy;
+    scroll.offX += dx;
+    scroll.offY += dy;
+    const fresh = solver.shift(dx, dy);
+    // 描画済みの絵をずらす (全マス描き直すと大きいマップで重い)
+    if (!tmpCv) tmpCv = document.createElement("canvas");
+    if (tmpCv.width !== mapCv.width || tmpCv.height !== mapCv.height) {
+      tmpCv.width = mapCv.width;
+      tmpCv.height = mapCv.height;
+    }
+    const tctx = tmpCv.getContext("2d");
+    tctx.clearRect(0, 0, tmpCv.width, tmpCv.height);
+    tctx.drawImage(mapCv, 0, 0);
+    mctx.clearRect(0, 0, mapCv.width, mapCv.height);
+    mctx.drawImage(tmpCv, -dx * 32, -dy * 32);
+    solver.run(params((Math.random() * 1e9) | 0), fresh);
+    for (const i of fresh) solver.dirty.add(i);
+    flushDirty();
   }
 
   /** 1セルを塗る。戻り値: 置けたか */
@@ -468,7 +500,10 @@
       return;
     }
     pushUndo();
-    if (mode === "all") solver.clear(false);
+    if (mode === "all") {
+      solver.clear(false);
+      Object.assign(scroll, { offX: 0, offY: 0, dirX: 0, dirY: 0, epoch: 0 });
+    }
     if (mode === "regen") solver.clear(true);
     if (P.border.checked && ROOT >= 0) {
       for (let x = 0; x < W; x++)
@@ -821,8 +856,15 @@
       }
     });
 
+    const ARROWS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
     window.addEventListener("keydown", (e) => {
       if (e.target instanceof HTMLInputElement && e.target.type !== "checkbox" && e.target.type !== "range") return;
+      if (ARROWS[e.key] && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        if (e.target instanceof HTMLInputElement && e.target.type === "range") return;
+        e.preventDefault();
+        scrollMap(...ARROWS[e.key], !e.repeat);
+        return;
+      }
       if (e.key === "Shift") {
         shiftDown = true;
         needDraw = true;
