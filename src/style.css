@@ -80,6 +80,10 @@ label { white-space: nowrap; }
 .row .w { color: var(--dim); font-size: 11px; text-align: right; }
 .row.sel { border-color: var(--sel); background: #34343a; }
 .row.no { opacity: 0.32; }
+.row .name small { color: var(--dim); font-size: 10px; }
+.sect { padding: 0 8px 4px; display: flex; align-items: center; gap: 4px; color: var(--dim); }
+.sect button { margin-left: auto; }
+.sect button + button { margin-left: 0; }
 
 .params { padding: 0 8px; display: flex; flex-direction: column; gap: 4px; }
 .params label { display: grid; grid-template-columns: 72px 1fr 28px; align-items: center; gap: 4px; }
@@ -106,3 +110,4 @@ label { white-space: nowrap; }
 #stInfo { flex: 1; overflow: hidden; text-overflow: ellipsis; }
 #stCount { color: var(--dim); }
 #stMsg { color: var(--warn); }
+#bopts[hidden] { display: none; }

@@ -3,6 +3,8 @@
   const T = window.TERRAINS;
   const { cellPieces, piecePos } = window.Autotile;
   const { Solver, bits, popcount } = window.WFC;
+  const B = window.BUILDINGS || [];
+  const BuildLayer = window.BuildLayer;
   const $ = (id) => document.getElementById(id);
   const KEYS = "1234567890QWERTYUIOPASDJKLZXCVBNM".split("");
   const ZOOMS = [0.125, 0.25, 0.5, 1, 2, 3, 4, 6, 8];
@@ -27,9 +29,12 @@
   // ---------------------------------------------------------------- 状態
   let W = 64, H = 40;
   const solver = new Solver(T, W, H);
+  // 建造物レイヤー。変更は solver.dirty に載せて地形と一緒に描き直す
+  const layer = new BuildLayer(B, W, H, (i) => solver.dirty.add(i));
   let sel = Math.max(0, T.findIndex((t) => t.id === "grass"));
+  let selB = -1; // 建造物を選んでいるときはその番号 (地形の sel より優先)
   let brush = 1;
-  const imgs = [];
+  const imgs = [], bimgs = [];
   const mapCv = document.createElement("canvas");
   let mctx;
   const cv = $("cv"), ctx = cv.getContext("2d");
@@ -44,23 +49,20 @@
   let msgTimer = 0;
 
   const P = {
-    clump: $("pClump"), bias: $("pBias"), scale: $("pScale"), border: $("pBorder"), anim: $("pAnim"),
+    clump: $("pClump"), bias: $("pBias"), scale: $("pScale"), border: $("pBorder"), anim: $("pAnim"), bld: $("pBld"), ahead: $("pAhead"),
     grid: $("optGrid"), cand: $("optCand"), manual: $("optManual"), seed: $("seed"), lock: $("seedLock"),
   };
 
   // ---------------------------------------------------------------- 画像
   function loadImages() {
-    return Promise.all(
-      T.map(
-        (t, i) =>
-          new Promise((res) => {
-            const im = new Image();
-            im.onload = () => res((imgs[i] = im));
-            im.onerror = () => res((imgs[i] = null));
-            im.src = t.png;
-          })
-      )
-    );
+    const load = (src, arr, i) =>
+      new Promise((res) => {
+        const im = new Image();
+        im.onload = () => res((arr[i] = im));
+        im.onerror = () => res((arr[i] = null));
+        im.src = src;
+      });
+    return Promise.all([...T.map((t, i) => load(t.png, imgs, i)), ...B.map((b, i) => load(b.png, bimgs, i))]);
   }
 
   // ---------------------------------------------------------------- 描画: マップバッファ
@@ -80,6 +82,29 @@
       const [c, r] = piecePos(ks[q]);
       mctx.drawImage(imgs[v], c * 16, r * 16, 16, 16, px + (q & 1) * 16, py + (q >> 1) * 16, 16, 16);
     }
+    drawBuilding(mctx, x, y, px, py, 32);
+  }
+  /** セル(x,y)の建造物を (px,py) に大きさ s で描く */
+  function drawBuilding(g, x, y, px, py, s) {
+    const i = y * W + x, bi = layer.b[i], im = bi >= 0 && bimgs[bi];
+    if (!im) return;
+    const d = B[bi];
+    if (d.kind === "fixed") {
+      // 高さ可変は高さごとの絵が横に並んでいる
+      const { v, local } = layer.partInfo(bi, layer.part[i]);
+      g.drawImage(im, v * d.w * 32 + (local % d.w) * 32, ((local / d.w) | 0) * 32, 32, 32, px, py, s, s);
+    } else if (d.kind === "line") {
+      g.drawImage(im, layer.lineMask(x, y, solver.cells) * 32, 0, 32, 32, px, py, s, s);
+    } else {
+      const ks = cellPieces(x, y, (nx, ny) => nx < 0 || ny < 0 || nx >= W || ny >= H || layer.b[ny * W + nx] === bi);
+      const h = s / 2;
+      for (let q = 0; q < 4; q++) {
+        const [c, r] = piecePos(ks[q]);
+        g.drawImage(im, c * 16, r * 16, 16, 16, px + (q & 1) * h, py + (q >> 1) * h, h, h);
+      }
+      // 町など: 地面の上にそのマスの飾り (シートの 160px より右に並んでいる)
+      if (d.deco) g.drawImage(im, 160 + (layer.part[i] % d.deco) * 32, 0, 32, 32, px, py, s, s);
+    }
   }
   function rebuildMap() {
     mapCv.width = W * 32;
@@ -92,6 +117,8 @@
   }
   function flushDirty() {
     if (!solver.dirty.size) return;
+    // 地形が変わって合わなくなった建造物は消す
+    if (!running) layer.prune([...solver.dirty], solver.cells);
     if (solver.dirty.size > (W * H) / 4) {
       rebuildMap();
       afterChange();
@@ -111,6 +138,7 @@
     afterChange();
   }
   function afterChange() {
+    if (!scrolling) dropAhead();
     popup = null;
     if (hover) {
       hover.cand = -1;
@@ -245,12 +273,25 @@
       }
 
     // ホバー: ブラシ範囲
-    if (hover && !drag?.pan && !hover.inPop) {
+    if (hover && !drag?.pan && !hover.inPop && selB >= 0 && B[selB].kind !== "area") {
+      // 建造物: 置く位置にうっすら描く
+      const d = B[selB], [ax, ay] = anchorOf(hover.x, hover.y), v = variantNow(), h = layer.heightOf(selB, v);
+      const ok = layer.check(selB, ax, ay, solver.cells, v).ok;
+      if (bimgs[selB] && ok) {
+        ctx.globalAlpha = 0.6;
+        if (d.kind === "fixed") ctx.drawImage(bimgs[selB], (v || 0) * d.w * 32, 0, d.w * 32, h * 32, ox + ax * c, oy + ay * c, d.w * c, h * c);
+        else ctx.drawImage(bimgs[selB], 10 * 32, 0, 32, 32, ox + ax * c, oy + ay * c, c, c);
+        ctx.globalAlpha = 1;
+      }
+      ctx.strokeStyle = ok ? "#ffffff" : "#e0705a";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(ox + ax * c + 0.5, oy + ay * c + 0.5, d.w * c - 1, h * c - 1);
+    } else if (hover && !drag?.pan && !hover.inPop) {
       const r = (brush - 1) >> 1;
       const bx0 = Math.max(0, hover.x - r), by0 = Math.max(0, hover.y - r);
       const bx1 = Math.min(W - 1, hover.x + r), by1 = Math.min(H - 1, hover.y + r);
-      const ok = (solver.allowedAt(hover.i) >>> sel) & 1 || solver.cells[hover.i] === sel;
-      ctx.strokeStyle = shiftDown ? "#f0b040" : ok ? "#ffffff" : "#e0705a";
+      const ok = selB >= 0 ? layer.check(selB, hover.x, hover.y, solver.cells).ok || layer.b[hover.i] === selB : (solver.allowedAt(hover.i) >>> sel) & 1 || solver.cells[hover.i] === sel;
+      ctx.strokeStyle = shiftDown && selB < 0 ? "#f0b040" : ok ? "#ffffff" : "#e0705a";
       ctx.lineWidth = 1;
       ctx.strokeRect(ox + bx0 * c + 0.5, oy + by0 * c + 0.5, (bx1 - bx0 + 1) * c - 1, (by1 - by0 + 1) * c - 1);
     }
@@ -341,7 +382,7 @@
     if (s) msgTimer = setTimeout(() => ($("stMsg").textContent = ""), 2800);
   }
   function snapshot() {
-    return { snap: solver.snapshot() };
+    return { snap: solver.snapshot(), bld: layer.snapshot() };
   }
   function pushUndo(s = snapshot()) {
     undo.push(s);
@@ -355,6 +396,8 @@
     solver.restore(s.snap);
     W = solver.W;
     H = solver.H;
+    if (s.bld) layer.restore(s.bld);
+    else layer.resize(W, H);
     if (resized) {
       $("mapW").value = W;
       $("mapH").value = H;
@@ -396,6 +439,86 @@
     };
   }
 
+  // ---------------------------------------------------------------- スクロールの先読み
+  // 1列ずつその場で生成すると、新しい列はすぐ隣の列をなぞるだけになり、地形が進行方向へ帯状に伸びる。
+  // 先読みでは、進む先の AHEAD 列ぶんを端の CTX 列につなげた小さな盤面で2Dに生成しておき、1列ずつ取り出す。
+  // ahead[向き] = 盤面の外側の列 (近い順)。L/R は長さ H の列、U/D は長さ W の行。
+  const AHEAD = 16, CTX = 2;
+  const ahead = { L: [], R: [], U: [], D: [] };
+  let scrolling = false;
+  const dirKey = (dx, dy) => (dx > 0 ? "R" : dx < 0 ? "L" : dy > 0 ? "D" : "U");
+  function dropAhead() {
+    for (const k in ahead) ahead[k].length = 0;
+  }
+  /** 進む向きの先読みを作る */
+  function fillAhead(dx, dy) {
+    const K = AHEAD, horiz = dx !== 0;
+    const tw = horiz ? K + CTX : W, th = horiz ? H : K + CTX;
+    // 小さな盤面の (tx,ty) が元の盤面のどこか
+    const mx = (tx) => (dx > 0 ? W - CTX + tx : dx < 0 ? tx - K : tx);
+    const my = (ty) => (dy > 0 ? H - CTX + ty : dy < 0 ? ty - K : ty);
+    const t = new Solver(T, tw, th), region = [];
+    for (let ty = 0; ty < th; ty++)
+      for (let tx = 0; tx < tw; tx++) {
+        const x = mx(tx), y = my(ty), i = ty * tw + tx;
+        if (x >= 0 && y >= 0 && x < W && y < H) t.cells[i] = solver.cells[y * W + x];
+        else region.push(i);
+      }
+    t.recompute();
+    t.run({ ...params((Math.random() * 1e9) | 0), offX: scroll.offX + mx(0), offY: scroll.offY + my(0), dimW: W, dimH: H, order: 1 }, region);
+    // 建造物も先読みの盤面で決めておく (現れてから見えている側へ広がらないように strict)
+    const tl = new BuildLayer(B, tw, th);
+    for (let ty = 0; ty < th; ty++)
+      for (let tx = 0; tx < tw; tx++) {
+        const x = mx(tx), y = my(ty);
+        if (x >= 0 && y >= 0 && x < W && y < H) {
+          tl.b[ty * tw + tx] = layer.b[y * W + x];
+          tl.part[ty * tw + tx] = layer.part[y * W + x];
+        }
+      }
+    if (P.bld.checked) tl.autoPlace(t.cells, { seed: (Math.random() * 1e9) | 0, region, strict: true });
+    const q = ahead[dirKey(dx, dy)];
+    q.length = 0;
+    for (let k = 0; k < K; k++) {
+      // 近い順: 右/下なら CTX 列目から、左/上なら K-1 列目から
+      const at = dx > 0 || dy > 0 ? CTX + k : K - 1 - k, n = horiz ? H : W;
+      const line = { t: new Int16Array(n), b: new Int16Array(n), p: new Uint8Array(n) };
+      for (let j = 0; j < n; j++) {
+        const i = horiz ? j * tw + at : at * tw + j;
+        line.t[j] = t.cells[i];
+        line.b[j] = tl.b[i];
+        line.p[j] = tl.part[i];
+      }
+      q.push(line);
+    }
+  }
+  /** 盤面が (dx,dy) ずれたときの先読みの後始末: 逆向きは捨て、直交する向きはいっしょにずらす */
+  function shiftAhead(dx, dy) {
+    if (dx) ahead[dirKey(-dx, 0)].length = 0;
+    if (dy) ahead[dirKey(0, -dy)].length = 0;
+    const slide = (q, d) => {
+      for (let k = 0; k < q.length; k++) {
+        const o = q[k], len = o.t.length;
+        const n = { t: new Int16Array(len).fill(-1), b: new Int16Array(len).fill(-1), p: new Uint8Array(len) };
+        for (let j = 0; j < len; j++)
+          if (j + d >= 0 && j + d < len) {
+            n.t[j] = o.t[j + d];
+            n.b[j] = o.b[j + d];
+            n.p[j] = o.p[j + d];
+          }
+        q[k] = n;
+      }
+    };
+    if (dy) {
+      slide(ahead.L, dy);
+      slide(ahead.R, dy);
+    }
+    if (dx) {
+      slide(ahead.U, dx);
+      slide(ahead.D, dx);
+    }
+  }
+
   let tmpCv = null;
   /** 矢印の向きへ1マス進む: はみ出したマスを消し、空いた列/行をWFCで生成 */
   function scrollMap(dx, dy, record) {
@@ -404,9 +527,31 @@
     if ((dx && scroll.dirX === -dx) || (dy && scroll.dirY === -dy)) scroll.epoch++;
     if (dx) scroll.dirX = dx;
     if (dy) scroll.dirY = dy;
+    const useAhead = P.ahead.checked;
+    if (useAhead && !ahead[dirKey(dx, dy)].length) fillAhead(dx, dy);
     scroll.offX += dx;
     scroll.offY += dy;
     const fresh = solver.shift(dx, dy);
+    layer.shift(dx, dy);
+    shiftAhead(dx, dy);
+    let rest = fresh;
+    if (useAhead) {
+      // 先読みの列を置く。置けなかったマス (ずれて分からなくなった所など) だけ WFC で埋める
+      const line = ahead[dirKey(dx, dy)].shift();
+      rest = [];
+      for (const i of fresh) {
+        const j = dx ? (i / W) | 0 : i % W, v = line ? line.t[j] : -1;
+        if (!(v >= 0 && solver.place(i, v, 0, false))) {
+          rest.push(i);
+          continue;
+        }
+        // 先読みで決めた建造物 (地形が合わなければ flushDirty の prune で消える)
+        if (line.b[j] >= 0) {
+          layer.b[i] = line.b[j];
+          layer.part[i] = line.p[j];
+        }
+      }
+    }
     // 描画済みの絵をずらす (全マス描き直すと大きいマップで重い)
     if (!tmpCv) tmpCv = document.createElement("canvas");
     if (tmpCv.width !== mapCv.width || tmpCv.height !== mapCv.height) {
@@ -418,9 +563,13 @@
     tctx.drawImage(mapCv, 0, 0);
     mctx.clearRect(0, 0, mapCv.width, mapCv.height);
     mctx.drawImage(tmpCv, -dx * 32, -dy * 32);
-    solver.run(params((Math.random() * 1e9) | 0), fresh);
+    if (rest.length) solver.run(params((Math.random() * 1e9) | 0), rest);
     for (const i of fresh) solver.dirty.add(i);
+    // 旧方式 (先読みなし) は現れた列を起点に置く。足場や町の広がりは見えている側にはみ出す
+    if (P.bld.checked && !useAhead) layer.autoPlace(solver.cells, { seed: (Math.random() * 1e9) | 0, region: fresh });
+    scrolling = true; // 先読みを捨てないように (flushDirty → afterChange)
     flushDirty();
+    scrolling = false;
   }
 
   /** 1セルを塗る。戻り値: 置けたか */
@@ -446,7 +595,81 @@
       }
     return out.sort((a, b) => a[0] - b[0]).map((a) => a[1]);
   }
+  /** 建造物の足場の左上 (ポインタのセルが足場の真ん中あたりに来るように) */
+  function anchorOf(x, y) {
+    const d = B[selB];
+    // 高さ可変 (塔) はポインタのマスが土台 (一番下の段) になる
+    if (d.hs) return [x - ((d.w - 1) >> 1), y - (heightNow() - 1)];
+    return [x - ((d.w - 1) >> 1), y - ((d.h - 1) >> 1)];
+  }
+  // 高さ可変の建造物で選んでいる高さ (建造物ごと)
+  const bHeight = {};
+  const heightNow = () => {
+    const d = B[selB];
+    return d && d.hs ? Math.max(d.hs[0], Math.min(d.hs[1], bHeight[d.id] ?? d.h)) : d ? d.h : 1;
+  };
+  const variantNow = () => (B[selB] && B[selB].hs ? heightNow() - B[selB].hs[0] : undefined);
+  function setHeight(h) {
+    const d = B[selB];
+    if (!d || !d.hs) return;
+    bHeight[d.id] = Math.max(d.hs[0], Math.min(d.hs[1], h));
+    updateBOpts();
+    needDraw = true;
+  }
+  /** 建造物の選択肢 (高さ) を出す */
+  function updateBOpts() {
+    const box = $("bopts"), d = B[selB];
+    box.innerHTML = "";
+    box.hidden = !(d && d.hs);
+    if (box.hidden) return;
+    box.append("高さ ");
+    for (let h = d.hs[0]; h <= d.hs[1]; h++) {
+      const bt = document.createElement("button");
+      bt.textContent = h;
+      bt.classList.toggle("on", h === heightNow());
+      bt.onclick = () => setHeight(h);
+      box.appendChild(bt);
+    }
+    box.title = "高さ (マス)。[ ] キーでも変えられます";
+  }
+  const onNames = (bi) => T.filter((_, t) => layer.allows(bi, t)).map((t) => t.name).join("・");
+  /** 建造物を置く。fixed は足場1つ、line は1マス、area はブラシの範囲 */
+  function buildAt(x, y, quiet) {
+    const d = B[selB];
+    const list = d.kind === "area" ? brushCells(x, y).map((i) => [i % W, (i / W) | 0]) : [anchorOf(x, y)];
+    let any = false, why = "";
+    for (const [ax, ay] of list) {
+      if (d.kind !== "fixed" && layer.at(ax, ay) === selB) continue;
+      // line / area は別の建造物 (line・area) の上なら置き換える
+      const i = ay * W + ax;
+      if (d.kind !== "fixed" && ax >= 0 && ay >= 0 && ax < W && ay < H && layer.b[i] >= 0 && B[layer.b[i]].kind !== "fixed" && layer.allows(selB, solver.cells[i])) {
+        touch();
+        layer.removeAt(i);
+      }
+      const r = layer.check(selB, ax, ay, solver.cells, variantNow());
+      if (r.ok) {
+        touch();
+        layer.place(selB, ax, ay, solver.cells, variantNow());
+        any = true;
+      } else why = why || r.why;
+    }
+    if (!any && why && !quiet && list.length === 1) {
+      const [ax, ay] = list[0];
+      if (ax >= 0 && ay >= 0 && ax < W && ay < H) flash = { i: ay * W + ax, until: performance.now() + 260 };
+      msg(why === "地形が合いません" ? `${d.name} は ${onNames(selB)} に置けます` : `${d.name}: ${why}`);
+    }
+    flushDirty();
+  }
+  function eraseBuildingsAt(x, y) {
+    const list = brushCells(x, y).filter((i) => layer.b[i] >= 0);
+    if (!list.length) return;
+    touch();
+    for (const i of list) layer.removeAt(i);
+    flushDirty();
+  }
+
   function paintAt(x, y, force) {
+    if (selB >= 0) return buildAt(x, y, drag && drag.moved);
     let fail = -1;
     for (const i of brushCells(x, y)) if (!paintCell(i, sel, force) && fail < 0) fail = i;
     if (fail >= 0 && brush === 1) {
@@ -455,10 +678,13 @@
     }
     flushDirty();
   }
+  /** 右クリック: 建造物を選んでいれば建造物だけ、地形なら地形ごと (上の建造物も) 消す */
   function eraseAt(x, y) {
+    if (selB >= 0) return eraseBuildingsAt(x, y);
     const list = brushCells(x, y).filter((i) => solver.cells[i] >= 0);
     if (!list.length) return;
     touch();
+    for (const i of list) if (layer.b[i] >= 0) layer.removeAt(i);
     solver.eraseMany(list);
     flushDirty();
   }
@@ -500,11 +726,14 @@
       return;
     }
     pushUndo();
+    genMode = mode;
     if (mode === "all") {
       solver.clear(false);
+      layer.clear();
       Object.assign(scroll, { offX: 0, offY: 0, dirX: 0, dirY: 0, epoch: 0 });
     }
-    if (mode === "regen") solver.clear(true);
+    // 手動で置いたマスと、建造物の下の地形は残す
+    if (mode === "regen") solver.eraseMany(solver.cells.reduce((a, v, i) => (v >= 0 && !solver.manual[i] && layer.b[i] < 0 && a.push(i), a), []));
     if (P.border.checked && ROOT >= 0) {
       for (let x = 0; x < W; x++)
         for (const y of [0, H - 1]) {
@@ -532,10 +761,13 @@
     solver.stop();
     finishGen();
   }
+  let genMode = "";
   function finishGen() {
     running = false;
     $("bGen").textContent = "生成";
     $("bGen").classList.remove("running");
+    if (genMode === "all" && P.bld.checked) layer.autoPlace(solver.cells, { seed: +P.seed.value | 0 });
+    genMode = "";
     flushDirty();
     const bad = solver.cells.reduce((n, v, i) => n + (v < 0 && solver.dom[i] === 0 ? 1 : 0), 0);
     if (bad) msg(`矛盾 ${bad} マス（×印）。消して埋め直してください`);
@@ -584,6 +816,7 @@
         t.weight = +rg.value;
         wv.textContent = rg.value;
         scheduleSave();
+        dropAhead();
       };
       rg.onpointerdown = (e) => e.stopPropagation();
       row.append(key, sw, name, rg, wv);
@@ -595,13 +828,95 @@
       box.appendChild(row);
       rows.push({ row, rg, wv });
     });
+    // 建造物
+    const bbox = $("bpalette");
+    bbox.innerHTML = "";
+    const KIND = { fixed: (d) => (d.hs ? `${d.w}×${d.hs[0]}〜${d.hs[1]}` : `${d.w}×${d.h}`), line: () => "線", area: () => "面" };
+    B.forEach((d, bi) => {
+      const row = document.createElement("div");
+      row.className = "row b";
+      const sw = document.createElement("canvas");
+      sw.width = sw.height = 32;
+      const g = sw.getContext("2d");
+      g.imageSmoothingEnabled = false;
+      if (imgs[sel]) g.drawImage(imgs[sel], 128, 0, 32, 32, 0, 0, 32, 32);
+      if (bimgs[bi]) {
+        if (d.kind === "fixed") {
+          // 縦横比を保って 32x32 に収める (高さ可変は一番低い絵)
+          const h = d.hs ? d.hs[0] : d.h, k = Math.min(32 / (d.w * 32), 32 / (h * 32));
+          g.drawImage(bimgs[bi], 0, 0, d.w * 32, h * 32, (32 - d.w * 32 * k) / 2, 32 - h * 32 * k, d.w * 32 * k, h * 32 * k);
+        }
+        else if (d.kind === "line") g.drawImage(bimgs[bi], 10 * 32, 0, 32, 32, 0, 0, 32, 32);
+        else {
+          for (let q = 0; q < 4; q++) {
+            // 1マスだけの面 = 凸角 ①〜④
+            const [c, r] = piecePos(1 + q);
+            g.drawImage(bimgs[bi], c * 16, r * 16, 16, 16, (q & 1) * 16, (q >> 1) * 16, 16, 16);
+          }
+          if (d.deco) g.drawImage(bimgs[bi], 160, 0, 32, 32, 0, 0, 32, 32);
+        }
+      }
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = d.name;
+      const kind = document.createElement("small");
+      kind.textContent = " " + KIND[d.kind](d);
+      name.appendChild(kind);
+      name.title = "置ける地形: " + T.filter((_, t) => layer.allows(bi, t)).map((t) => t.name).join("・");
+      // 自動配置の頻度 (倍率)。自動で置かないもの (城壁) は出さない
+      const rg = document.createElement("input"), wv = document.createElement("span");
+      wv.className = "w";
+      rg.type = "range";
+      if (d.auto) {
+        rg.min = 0;
+        rg.max = 3;
+        rg.step = 0.1;
+        rg.value = layer.freq[bi];
+        rg.title = "自動配置の頻度 (倍率)。0 で置かない。ダブルクリックで 1 に戻す";
+        wv.textContent = layer.freq[bi];
+        rg.oninput = () => {
+          layer.freq[bi] = +rg.value;
+          wv.textContent = rg.value;
+          scheduleSave();
+          dropAhead(); // 先読みの建造物は古い頻度で決まっている
+        };
+        rg.onpointerdown = (e) => e.stopPropagation();
+        row.ondblclick = () => setFreq(bi, 1);
+      } else rg.style.visibility = "hidden";
+      row.append(document.createElement("span"), sw, name, rg, wv);
+      row.onpointerdown = () => selectB(bi);
+      bbox.appendChild(row);
+      brows.push(row);
+      bsliders[bi] = { rg, wv };
+    });
     select(sel);
     setBrush(brush);
   }
+  const brows = [], bsliders = [];
+  function setFreq(bi, f) {
+    layer.freq[bi] = f;
+    if (bsliders[bi]) {
+      bsliders[bi].rg.value = f;
+      bsliders[bi].wv.textContent = f;
+    }
+    scheduleSave();
+    dropAhead();
+  }
   function select(i) {
     sel = i;
+    selB = -1;
+    updateBOpts();
     rows.forEach((r, k) => r.row.classList.toggle("sel", k === i));
+    brows.forEach((r) => r.classList.remove("sel"));
     needDraw = true;
+  }
+  function selectB(bi) {
+    selB = bi;
+    updateBOpts();
+    rows.forEach((r) => r.row.classList.remove("sel"));
+    brows.forEach((r, k) => r.classList.toggle("sel", k === bi));
+    needDraw = true;
+    dimPalette();
   }
   function setBrush(b) {
     brush = b;
@@ -611,6 +926,8 @@
   function dimPalette() {
     const mask = hover && !drag ? solver.allowedAt(hover.i) : solver.ALL;
     rows.forEach((r, k) => r.row.classList.toggle("no", !((mask >>> k) & 1)));
+    const t = hover && !drag ? solver.cells[hover.i] : -1;
+    brows.forEach((r, k) => r.classList.toggle("no", t >= 0 && !layer.allows(k, t)));
   }
 
   // ---------------------------------------------------------------- ステータス
@@ -620,7 +937,7 @@
     if (hover) {
       const v = solver.cells[hover.i];
       if (hover.cand >= 0) s = `クリックで ${T[hover.cand].name} を配置`;
-      else if (v >= 0) s = T[v].name + (solver.manual[hover.i] ? "（手動）" : "");
+      else if (v >= 0) s = T[v].name + (solver.manual[hover.i] ? "（手動）" : "") + (layer.b[hover.i] >= 0 ? " ／ " + B[layer.b[hover.i]].name : "");
       else {
         const d = solver.dom[hover.i];
         if (d === 0) s = "矛盾";
@@ -646,11 +963,17 @@
       ids: T.map((t) => t.id),
       cells: Array.from(solver.cells),
       manual: Array.from(solver.manual),
+      bids: B.map((b) => b.id),
+      blds: Array.from(layer.b),
+      bpart: Array.from(layer.part),
       weights: Object.fromEntries(T.map((t) => [t.id, t.weight])),
-      params: { clump: +P.clump.value, bias: +P.bias.value, scale: +P.scale.value, border: P.border.checked, anim: P.anim.checked },
+      bfreq: Object.fromEntries(B.map((b, i) => [b.id, layer.freq[i]])),
+      params: { clump: +P.clump.value, bias: +P.bias.value, scale: +P.scale.value, border: P.border.checked, anim: P.anim.checked, bld: P.bld.checked, ahead: P.ahead.checked },
       seed: +P.seed.value,
       lock: P.lock.checked,
       sel: T[sel].id,
+      selB: selB >= 0 ? B[selB].id : null,
+      bHeight,
       brush,
     };
   }
@@ -663,6 +986,16 @@
     o.cells.forEach((v, i) => (solver.cells[i] = v >= 0 ? map[v] ?? -1 : -1));
     (o.manual || []).forEach((m, i) => (solver.manual[i] = m));
     solver.recompute();
+    layer.resize(W, H);
+    if (o.blds) {
+      const bmap = (o.bids || []).map((id) => B.findIndex((b) => b.id === id));
+      o.blds.forEach((v, i) => {
+        const bi = v >= 0 ? bmap[v] ?? -1 : -1;
+        if (bi < 0) return;
+        layer.b[i] = bi;
+        layer.part[i] = (o.bpart && o.bpart[i]) || 0;
+      });
+    }
     if (o.weights) T.forEach((t, i) => {
       if (o.weights[t.id] !== undefined) t.weight = o.weights[t.id];
       if (rows[i]) {
@@ -676,14 +1009,20 @@
       P.scale.value = o.params.scale;
       P.border.checked = !!o.params.border;
       P.anim.checked = o.params.anim !== false;
+      P.bld.checked = o.params.bld !== false;
+      P.ahead.checked = o.params.ahead !== false;
     }
     if (o.seed !== undefined) P.seed.value = o.seed;
     P.lock.checked = !!o.lock;
     if (o.sel) select(Math.max(0, T.findIndex((t) => t.id === o.sel)));
+    if (o.bHeight) Object.assign(bHeight, o.bHeight);
+    B.forEach((b, i) => setFreq(i, o.bfreq && o.bfreq[b.id] !== undefined ? o.bfreq[b.id] : 1));
+    if (o.selB && B.some((b) => b.id === o.selB)) selectB(B.findIndex((b) => b.id === o.selB));
     if (o.brush) setBrush(o.brush);
     $("mapW").value = W;
     $("mapH").value = H;
     syncOutputs();
+    dropAhead();
     rebuildMap();
     updateCount();
   }
@@ -716,6 +1055,20 @@
       stopGen();
       pushUndo();
       solver.clear(false);
+      layer.clear();
+      flushDirty();
+    };
+    $("bAutoB").onclick = () => {
+      stopGen();
+      pushUndo();
+      const n = layer.autoPlace(solver.cells, { seed: (Math.random() * 1e9) | 0 });
+      msg(n ? `建造物を ${n} か所に置きました` : "置ける場所がありません");
+      flushDirty();
+    };
+    $("bClearB").onclick = () => {
+      stopGen();
+      pushUndo();
+      layer.clear();
       flushDirty();
     };
     $("bUndo").onclick = doUndo;
@@ -731,6 +1084,8 @@
       solver.resize(w, h, true);
       W = w;
       H = h;
+      layer.resize(w, h, true);
+      dropAhead();
       rebuildMap();
       fit();
       updateCount();
@@ -759,6 +1114,7 @@
         rows[i].rg.value = t.weight;
         rows[i].wv.textContent = t.weight;
       });
+      B.forEach((_, i) => setFreq(i, 1));
       scheduleSave();
     };
     [P.grid, P.cand, P.manual].forEach((el) => (el.onchange = () => (needDraw = true)));
@@ -766,6 +1122,7 @@
       el.addEventListener("input", () => {
         syncOutputs();
         scheduleSave();
+        dropAhead(); // 先読みは古いパラメータで作られている
       });
       el.addEventListener("change", scheduleSave);
     });
@@ -801,8 +1158,10 @@
       }
       if (e.button !== 0) return;
       if (e.altKey) {
-        const v = solver.cells[h.i];
-        if (v >= 0) select(v);
+        // スポイト: 建造物があればそれ、なければ地形
+        const b = layer.b[h.i], v = solver.cells[h.i];
+        if (b >= 0) selectB(b);
+        else if (v >= 0) select(v);
         return;
       }
       if (h.inPop) {
@@ -829,6 +1188,7 @@
         dimPalette();
       }
       if (drag && h && (h.x !== drag.last.x || h.y !== drag.last.y)) {
+        drag.moved = true;
         for (const [x, y] of line(drag.last, h)) {
           if (drag.mode === "paint") paintAt(x, y, drag.force || e.shiftKey);
           else eraseAt(x, y);
@@ -889,7 +1249,13 @@
       if (up === "G") startGen("all");
       else if (up === "F") startGen("fill");
       else if (up === "H") fit();
-      else if (e.key === "Escape") stopGen();
+      else if (e.key === "Escape") {
+        if (running) stopGen();
+        else if (selB >= 0) select(sel); // 建造物の選択をやめて地形に戻る
+      }
+      // 高さ可変の建造物を選んでいるときは [ ] で高さ、それ以外はブラシ
+      else if (e.key === "[" && selB >= 0 && B[selB].hs) setHeight(heightNow() - 1);
+      else if (e.key === "]" && selB >= 0 && B[selB].hs) setHeight(heightNow() + 1);
       else if (e.key === "[") setBrush([1, 3, 5, 9][Math.max(0, [1, 3, 5, 9].indexOf(brush) - 1)]);
       else if (e.key === "]") setBrush([1, 3, 5, 9][Math.min(3, [1, 3, 5, 9].indexOf(brush) + 1)]);
       else if (e.key === "+" || e.key === ";") zoomStep(1);
@@ -955,6 +1321,6 @@
     requestAnimationFrame(frame);
   }
   // コンソールからいじれるように
-  window.mapApp = { solver, T, view: () => ({ zoom, ox, oy, W, H }), setZoom, fit, select };
+  window.mapApp = { solver, layer, T, B, view: () => ({ zoom, ox, oy, W, H }), setZoom, fit, select, selectB, scrollMap };
   init();
 })();

@@ -386,7 +386,9 @@
       this.opts = Object.assign({ seed: 1, clump: 1.5, bias: 0, scale: 1 }, opts);
       this.rng = mulberry(this.opts.seed * 2654435761 + 12345);
       this._tie = new Float32Array(N);
-      for (let i = 0; i < N; i++) this._tie[i] = this.rng() * 1e-3;
+      // tie: 同じエントロピーのときの順番。order>0 だと順番をランダム寄りにする (帯状に伸びるのを防ぐ)
+      const tie = this.opts.order > 0 ? this.opts.order : 1e-3;
+      for (let i = 0; i < N; i++) this._tie[i] = this.rng() * tie;
       this._region = region ? new Set(region) : null;
       this._heap = new Heap();
       this._resets = 0;
@@ -394,7 +396,9 @@
       for (const i of cand) if (this.cells[i] < 0) this._pushHeap(i);
       // ノイズ誘導用のフィールド (標高・湿度・気温)
       if (this.opts.bias > 0) {
-        const s = this.opts.noiseSeed ?? this.opts.seed, sc = 7 / Math.max(this.W, this.H) / this.opts.scale;
+        // dimW/dimH: ノイズの尺度・緯度の基準にする「見えているマップ」の大きさ (先読み用の小さな盤面でも同じ地形になるように)
+        const DW = this.opts.dimW || this.W, DH = this.opts.dimH || this.H;
+        const s = this.opts.noiseSeed ?? this.opts.seed, sc = 7 / Math.max(DW, DH) / this.opts.scale;
         const offX = this.opts.offX || 0, offY = this.opts.offY || 0;
         this._E = new Float32Array(N);
         this._M = new Float32Array(N);
@@ -405,7 +409,7 @@
           const e = fbm(wx * sc, wy * sc, s * 7 + 1, 5);
           this._E[i] = Math.min(1, Math.max(0, (e - 0.5) * 3.0 + 0.36));
           this._M[i] = Math.min(1, Math.max(0, (fbm(wx * sc * 1.3 + 50, wy * sc * 1.3, s * 7 + 2, 4) - 0.5) * 2.6 + 0.5));
-          const lt = wy / Math.max(1, this.H - 1), lat = 1 - Math.abs(lt - Math.floor(lt) - 0.5) * 2;
+          const lt = wy / Math.max(1, DH - 1), lat = 1 - Math.abs(lt - Math.floor(lt) - 0.5) * 2;
           this._Tp[i] = Math.min(1, Math.max(0, lat * 0.55 + (fbm(wx * sc + 90, wy * sc, s * 7 + 3, 3) - 0.5) * 1.6 + 0.25));
         }
       }
