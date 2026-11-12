@@ -52,5 +52,57 @@
     return out;
   }
 
-  return { SUB, CELL, SHEET_W, SHEET_H, piecePos, pieceFor, pieceKind, QD, cellPieces };
+  // ---------------------------------------------------------------- 横視点
+  /**
+   * 横視点の地形情報。T: [{ parent, kind: "solid" | "air" | "liquid" }]
+   * solid: 地面か / anc: 祖先 (自分は含まない) のビット / desc: 子孫 (自分を含む) のビット
+   */
+  function sideInfo(T) {
+    const anc = T.map((t) => {
+      let m = 0;
+      for (let p = t.parent; p >= 0; p = T[p].parent) m |= 1 << p;
+      return m >>> 0;
+    });
+    const desc = T.map((_, v) => T.reduce((m, _, u) => ((anc[u] >>> v) & 1 || u === v ? (m | (1 << u)) >>> 0 : m), 0));
+    return { solid: T.map((t) => t.kind === "solid"), anc, desc, parent: T.map((t) => t.parent) };
+  }
+  /**
+   * 横視点で v が隣の u とつながって見えるか (つながらない側にフチを描く)。
+   * 地面は空・洞窟・水に対してフチを描き、空・水は地面に対してはフチを描かない。
+   * 同じ種類どうしは、祖先に対してフチを描き、子孫にはつながる。関係のない2つは番号の大きい方がフチを描く。
+   */
+  function sideConn(v, u, I) {
+    if (u < 0 || u === v) return true;
+    const sv = I.solid[v], su = I.solid[u];
+    if (sv !== su) return su;
+    if ((I.anc[v] >>> u) & 1) return false;
+    if ((I.desc[v] >>> u) & 1) return true;
+    return u > v;
+  }
+  /**
+   * 横視点のセル (x,y) の地形 v を描く手順。at(nx, ny) は隣の地形 (盤面の外・未確定は -1)。
+   * 象限ごとに [下に敷く地形の内部 (なければ -1), v のピース番号] を返す。
+   * 下に敷くのは、つながらない隣のうち空・洞窟・水を優先 (なければ地面、それもなければ親)。
+   */
+  function sideCell(x, y, v, at, I) {
+    const out = [];
+    for (let q = 0; q < 4; q++) {
+      const [dx, dy] = QD[q];
+      const uh = at(x + dx, y), uv = at(x, y + dy), ud = at(x + dx, y + dy);
+      const h = sideConn(v, uh, I), vv = sideConn(v, uv, I), d = sideConn(v, ud, I);
+      const k = pieceFor(q, h, vv, d);
+      let under = -1;
+      if (k < 17) {
+        // フチになっている向きの隣から選ぶ
+        const list = !h && !vv ? [uv, uh, ud] : !h ? [uh, ud, uv] : !vv ? [uv, ud, uh] : [ud, uh, uv];
+        const open = list.filter((u) => u >= 0 && !sideConn(v, u, I));
+        under = open.find((u) => !I.solid[u]) ?? open[0] ?? I.parent[v];
+        if (under === undefined) under = -1;
+      }
+      out.push([under, k]);
+    }
+    return out;
+  }
+
+  return { SUB, CELL, SHEET_W, SHEET_H, piecePos, pieceFor, pieceKind, QD, cellPieces, sideInfo, sideConn, sideCell };
 });

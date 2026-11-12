@@ -8,6 +8,8 @@
 </head>
 <body>
 <header id="bar">
+  <span class="seg"><button id="mWorld" title="見下ろしのワールドマップ">ワールド</button><button id="mSide" title="横から見たステージ (2D プラットフォーマー)">横視点</button></span>
+  <span class="sep"></span>
   <button id="bGen" title="G">生成</button>
   <button id="bRegen">手動以外を再生成</button>
   <button id="bFill" title="F">空きを埋める</button>
@@ -38,7 +40,7 @@
   <aside id="side">
     <div id="palette"></div>
     <hr>
-    <div class="sect">建造物 <button id="bAutoB" title="今の地形に合わせて建造物を撒く">自動配置</button><button id="bClearB">全部消す</button></div>
+    <div class="sect"><span id="sectB">建造物</span> <button id="bAutoB" title="今の地形に合わせて建造物を撒く">自動配置</button><button id="bClearB">全部消す</button></div>
     <div id="bopts" class="brushes" hidden></div>
     <div id="bpalette"></div>
     <hr>
@@ -46,9 +48,9 @@
       <label>まとまり <input id="pClump" type="range" min="0" max="4" step="0.1" value="1.5"><output></output></label>
       <label>地形ノイズ <input id="pBias" type="range" min="0" max="3" step="0.1" value="1"><output></output></label>
       <label>ノイズ尺度 <input id="pScale" type="range" min="0.4" max="3" step="0.1" value="1"><output></output></label>
-      <label class="chk"><input id="pBorder" type="checkbox" checked>外周を深海に</label>
+      <label class="chk" id="lblBorder"><input id="pBorder" type="checkbox" checked>外周を深海に</label>
       <label class="chk"><input id="pAnim" type="checkbox" checked>生成を見せる</label>
-      <label class="chk" title="生成・スクロールで現れた土地に建造物も自動で置く"><input id="pBld" type="checkbox" checked>建造物も自動配置</label>
+      <label class="chk" id="lblBld" title="生成・スクロールで現れた土地に建造物も自動で置く"><input id="pBld" type="checkbox" checked>建造物も自動配置</label>
       <label class="chk" title="オン: 進む先の数列をまとめて2Dで生成しておき1列ずつ出す（地形が進行方向に伸びにくい）。オフ: 1列ずつその場で生成（旧方式）"><input id="pAhead" type="checkbox" checked>スクロールは先読み生成</label>
       <button id="bResetW">重みを戻す</button>
     </div>
@@ -58,6 +60,8 @@
 <footer id="status"><span id="stPos"></span><span id="stInfo"></span><span id="stCount"></span><span id="stMsg"></span></footer>
 <script src="tiles/terrains.js"></script>
 <script src="tiles/buildings.js"></script>
+<script src="tiles/side-terrains.js"></script>
+<script src="tiles/side-objects.js"></script>
 <script src="src/autotile.js"></script>
 <script src="src/wfc.js"></script>
 <script src="src/buildings.js"></script>

@@ -103,31 +103,71 @@
       this.resize(W, H);
     }
 
+    /**
+     * T[k] の任意の項目 (どれも地形の番号の配列):
+     *   adj: 木構造に関係なく隣り合ってよい / ban: 隣り合ってはいけない (どちらも向きなし)
+     *   up / down / sides: 真上 / 真下 / 真横に来てよい地形 (横視点の「水は宙に浮かない」など)。
+     * 向きつきの制約は 8 方向それぞれの表 cmp[k] になる (k は resize の D の順、反対向きは 7-k)。
+     */
     setTerrains(T) {
       this.T = T;
       const n = (this.n = T.length);
       this.ALL = n >= 32 ? 0xffffffff : ((1 << n) - 1) >>> 0;
-      this.compat = new Uint32Array(n);
+      const base = new Uint32Array(n);
       for (let a = 0; a < n; a++)
         for (let b = 0; b < n; b++) {
           const pa = T[a].parent, pb = T[b].parent;
-          if (a === b || pa === b || pb === a || (pa >= 0 && pa === pb)) this.compat[a] |= 1 << b;
+          if (a === b || pa === b || pb === a || (pa >= 0 && pa === pb)) base[a] |= 1 << b;
         }
+      const pair = (a, b, on) => {
+        if (on) {
+          base[a] |= 1 << b;
+          base[b] |= 1 << a;
+        } else if (a !== b) {
+          base[a] &= ~(1 << b);
+          base[b] &= ~(1 << a);
+        }
+      };
+      T.forEach((t, a) => (t.adj || []).forEach((b) => pair(a, b, true)));
+      T.forEach((t, a) => (t.ban || []).forEach((b) => pair(a, b, false)));
+      const mk = (l) => (l || []).reduce((m, b) => (m | (1 << b)) >>> 0, 0);
+      this.cmp = [];
+      for (let k = 0; k < 8; k++) this.cmp.push(base.map((m) => m >>> 0));
+      this.dirn = false;
+      T.forEach((t, a) => {
+        for (const [key, ks] of [["up", [1]], ["down", [6]], ["sides", [3, 4]]]) {
+          if (!t[key]) continue;
+          this.dirn = true;
+          for (const k of ks) this.cmp[k][a] &= mk(t[key]);
+        }
+      });
+      // 向きつきの表は「a の k 向きに b」と「b の反対向きに a」がそろうようにする
+      if (this.dirn)
+        for (let k = 0; k < 8; k++)
+          for (let a = 0; a < n; a++)
+            for (let b = 0; b < n; b++)
+              if ((this.cmp[k][a] >>> b) & 1 && !((this.cmp[7 - k][b] >>> a) & 1)) this.cmp[k][a] &= ~(1 << b);
+      // compat: どれかの向きで隣り合える (reach・force の目安に使う)
+      this.compat = new Uint32Array(n);
+      for (let a = 0; a < n; a++) for (let k = 0; k < 8; k++) this.compat[a] |= this.cmp[k][a];
+      this.supCache = new Map();
       // reach[k][t]: tからk歩以内に置ける地形
       this.reach = [new Uint32Array(n).map((_, t) => 1 << t)];
       for (let k = 1; k < 16; k++) this.reach.push(this.reach[k - 1].map((m) => this.support(m)));
-      this.supCache = new Map();
       this.entCache = new Map();
     }
 
-    support(mask) {
+    /** mask のどれかの、k 向きの隣に置ける地形 (k を省くとどの向きでも) */
+    support(mask, k = -1) {
       if (!this.supCache) this.supCache = new Map();
-      let s = this.supCache.get(mask);
+      const key = mask * 9 + k + 1;
+      let s = this.supCache.get(key);
       if (s === undefined) {
         s = 0;
-        for (const b of bits(mask)) s |= this.compat[b];
+        const tab = k < 0 ? this.compat : this.cmp[k];
+        for (const b of bits(mask)) s |= tab[b];
         s >>>= 0;
-        this.supCache.set(mask, s);
+        this.supCache.set(key, s);
       }
       return s;
     }
@@ -164,10 +204,11 @@
       const dom = this.dom, nb = this.nb;
       while (stack.length) {
         const i = stack.pop();
-        const sup = this.support(dom[i]);
+        let sup = this.dirn ? 0 : this.support(dom[i]);
         for (let k = 0; k < 8; k++) {
           const j = nb[i * 8 + k];
           if (j < 0) continue;
+          if (this.dirn) sup = this.support(dom[i], k);
           const d = dom[j], nd = (d & sup) >>> 0;
           if (nd !== d) {
             if (trail) trail.push(j, d);
@@ -193,10 +234,11 @@
       while (stack.length) {
         const i = stack.pop();
         if (!dom[i]) continue;
-        const sup = this.support(dom[i]);
+        let sup = this.dirn ? 0 : this.support(dom[i]);
         for (let k = 0; k < 8; k++) {
           const j = nb[i * 8 + k];
           if (j < 0) continue;
+          if (this.dirn) sup = this.support(dom[i], k);
           const d = dom[j], nd = (d & sup) >>> 0;
           if (nd !== d) {
             dom[j] = nd;
@@ -289,7 +331,7 @@
       let mask = this.ALL;
       for (let k = 0; k < 8; k++) {
         const j = this.nb[i * 8 + k];
-        if (j >= 0 && this.cells[j] >= 0) mask &= this.compat[this.cells[j]];
+        if (j >= 0 && this.cells[j] >= 0) mask &= this.cmp[7 - k][this.cells[j]];
       }
       return mask >>> 0;
     }
@@ -394,24 +436,47 @@
       this._resets = 0;
       const cand = region || Array.from({ length: N }, (_, i) => i);
       for (const i of cand) if (this.cells[i] < 0) this._pushHeap(i);
-      // ノイズ誘導用のフィールド (標高・湿度・気温)
+      // ノイズ誘導用のフィールド。world: 標高・湿度・気温 / side (横視点): 地表からの深さ・地域・空洞
       if (this.opts.bias > 0) {
         // dimW/dimH: ノイズの尺度・緯度の基準にする「見えているマップ」の大きさ (先読み用の小さな盤面でも同じ地形になるように)
         const DW = this.opts.dimW || this.W, DH = this.opts.dimH || this.H;
         const s = this.opts.noiseSeed ?? this.opts.seed, sc = 7 / Math.max(DW, DH) / this.opts.scale;
         const offX = this.opts.offX || 0, offY = this.opts.offY || 0;
+        const side = this.opts.field === "side";
+        const cl = (v) => Math.min(1, Math.max(0, v));
         this._E = new Float32Array(N);
         this._M = new Float32Array(N);
         this._Tp = new Float32Array(N);
+        // 横視点: 地域 (m) は地表の近くだけで効かせる (地中の土や岩は地域に関係ない)
+        this._Mw = side ? new Float32Array(N) : null;
         for (const i of cand) {
           const x = i % this.W, y = (i / this.W) | 0;
           const wx = x + offX, wy = y + offY;
+          if (side) {
+            // 地表の高さ (世界座標の行)。E は地表で 0.45、下へ行くほど 1 に近づく
+            const surf = DH * 0.45 + (fbm(wx * sc * 0.7, 3.7, s * 7 + 4, 4) - 0.5) * DH * 0.9;
+            let e = 0.45 + ((wy - surf) / DH) * 0.95;
+            // 浮島: 空の中でノイズの高いところを地表と同じ深さにする
+            if (e < 0.4) {
+              const isl = fbm(wx * sc * 1.8 + 30, wy * sc * 4.5, s * 7 + 5, 3);
+              if (isl > 0.62) e = Math.max(e, Math.min(0.52, 0.3 + (isl - 0.62) * 4));
+            }
+            this._E[i] = cl(e);
+            this._Mw[i] = cl((0.68 - e) / 0.14);
+            // 地域 (砂漠 0 … 雪 1): 横方向にだけ変わる
+            this._M[i] = cl((fbm(wx * sc * 0.45 + 50, 1.3, s * 7 + 2, 3) - 0.5) * 4.5 + 0.5);
+            // 空洞: 横に長い洞窟になるように縦の周波数を上げる
+            this._Tp[i] = cl((fbm(wx * sc * 1.5, wy * sc * 2.4, s * 7 + 3, 3) - 0.5) * 3 + 0.5);
+            continue;
+          }
           const e = fbm(wx * sc, wy * sc, s * 7 + 1, 5);
           this._E[i] = Math.min(1, Math.max(0, (e - 0.5) * 3.0 + 0.36));
           this._M[i] = Math.min(1, Math.max(0, (fbm(wx * sc * 1.3 + 50, wy * sc * 1.3, s * 7 + 2, 4) - 0.5) * 2.6 + 0.5));
           const lt = wy / Math.max(1, DH - 1), lat = 1 - Math.abs(lt - Math.floor(lt) - 0.5) * 2;
           this._Tp[i] = Math.min(1, Math.max(0, lat * 0.55 + (fbm(wx * sc + 90, wy * sc, s * 7 + 3, 3) - 0.5) * 1.6 + 0.25));
         }
+        // 3つの好みの効きの強さ
+        this._fw = side ? [26, 8, 6] : [14, 1.5, 1.5];
       }
       this.running = true;
     }
@@ -430,9 +495,10 @@
         if (o.clump > 0) w *= Math.pow(1 + cnt[b], o.clump);
         if (o.bias > 0) {
           let d = 0;
-          if (T[b].e !== undefined) d += (T[b].e - this._E[i]) ** 2 * 14;
-          if (T[b].m !== undefined) d += (T[b].m - this._M[i]) ** 2 * 1.5;
-          if (T[b].t !== undefined) d += (T[b].t - this._Tp[i]) ** 2 * 1.5;
+          const fw = this._fw;
+          if (T[b].e !== undefined) d += (T[b].e - this._E[i]) ** 2 * fw[0];
+          if (T[b].m !== undefined) d += (T[b].m - this._M[i]) ** 2 * fw[1] * (this._Mw ? this._Mw[i] : 1);
+          if (T[b].t !== undefined) d += (T[b].t - this._Tp[i]) ** 2 * fw[2];
           w *= Math.exp(-o.bias * 6 * d);
         }
         ws.push(b, w);

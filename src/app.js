@@ -1,14 +1,29 @@
 (() => {
   "use strict";
-  const T = window.TERRAINS;
-  const { cellPieces, piecePos } = window.Autotile;
+  // モード: world (見下ろしのワールドマップ) / side (横視点。2D プラットフォーマーのステージ)
+  // URL の #side / #world か、前回のモード。モードごとに地形・建造物・保存先が別になる
+  const MODE_KEY = "wfcmap.mode";
+  const MODE = (() => {
+    const h = location.hash.slice(1);
+    if (h === "side" || h === "world") return h;
+    try {
+      return localStorage.getItem(MODE_KEY) === "side" ? "side" : "world";
+    } catch (e) {
+      return "world";
+    }
+  })();
+  const SIDE = MODE === "side";
+  const T = SIDE ? window.SIDE_TERRAINS : window.TERRAINS;
+  const { cellPieces, piecePos, sideInfo, sideCell } = window.Autotile;
   const { Solver, bits, popcount } = window.WFC;
-  const B = window.BUILDINGS || [];
+  const B = (SIDE ? window.SIDE_BUILDINGS : window.BUILDINGS) || [];
   const BuildLayer = window.BuildLayer;
   const $ = (id) => document.getElementById(id);
   const KEYS = "1234567890QWERTYUIOPASDJKLZXCVBNM".split("");
   const ZOOMS = [0.125, 0.25, 0.5, 1, 2, 3, 4, 6, 8];
-  const STORE = "wfcmap.v1";
+  const STORES = { world: "wfcmap.v1", side: "wfcmap.side.v1" };
+  const STORE = STORES[MODE];
+  const SI = SIDE ? sideInfo(T) : null;
   const ROOT = T.findIndex((t) => t.parent < 0);
   const defaultW = T.map((t) => t.weight);
 
@@ -71,10 +86,25 @@
     const u = solver.cells[ny * W + nx];
     return u < 0 || ((desc[v] >>> u) & 1) === 1;
   }
+  const cellAtXY = (nx, ny) => (nx < 0 || ny < 0 || nx >= W || ny >= H ? -1 : solver.cells[ny * W + nx]);
   function drawCell(x, y) {
     const v = solver.cells[y * W + x], px = x * 32, py = y * 32;
     mctx.clearRect(px, py, 32, 32);
     if (v < 0 || !imgs[v]) return;
+    if (SIDE) {
+      // 横視点: 象限ごとに、フチの外に見える隣 (空・洞窟・水) の内部を敷いてから自分のピースを重ねる
+      sideCell(x, y, v, cellAtXY, SI).forEach(([under, k], q) => {
+        const qx = px + (q & 1) * 16, qy = py + (q >> 1) * 16;
+        if (under >= 0 && imgs[under]) {
+          const [c, r] = piecePos(17 + q);
+          mctx.drawImage(imgs[under], c * 16, r * 16, 16, 16, qx, qy, 16, 16);
+        }
+        const [c, r] = piecePos(k);
+        mctx.drawImage(imgs[v], c * 16, r * 16, 16, 16, qx, qy, 16, 16);
+      });
+      drawBuilding(mctx, x, y, px, py, 32);
+      return;
+    }
     const p = T[v].parent;
     if (p >= 0 && imgs[p]) mctx.drawImage(imgs[p], 128, 0, 32, 32, px, py, 32, 32);
     const ks = cellPieces(x, y, (nx, ny) => connected(v, nx, ny));
@@ -106,6 +136,8 @@
       if (d.deco) g.drawImage(im, 160 + (layer.part[i] % d.deco) * 32, 0, 32, 32, px, py, s, s);
     }
   }
+  /** 線状の見本に使うつながり: 縦の線は上下 (N|S)、それ以外は左右 (E|W) */
+  const lineIcon = (d) => (d.axis === "v" ? 5 : 10);
   function rebuildMap() {
     mapCv.width = W * 32;
     mapCv.height = H * 32;
@@ -280,7 +312,7 @@
       if (bimgs[selB] && ok) {
         ctx.globalAlpha = 0.6;
         if (d.kind === "fixed") ctx.drawImage(bimgs[selB], (v || 0) * d.w * 32, 0, d.w * 32, h * 32, ox + ax * c, oy + ay * c, d.w * c, h * c);
-        else ctx.drawImage(bimgs[selB], 10 * 32, 0, 32, 32, ox + ax * c, oy + ay * c, c, c);
+        else ctx.drawImage(bimgs[selB], lineIcon(d) * 32, 0, 32, 32, ox + ax * c, oy + ay * c, c, c);
         ctx.globalAlpha = 1;
       }
       ctx.strokeStyle = ok ? "#ffffff" : "#e0705a";
@@ -436,6 +468,7 @@
     return {
       seed, clump: +P.clump.value, bias: +P.bias.value, scale: +P.scale.value,
       noiseSeed: (+P.seed.value | 0) + scroll.epoch * 7919, offX: scroll.offX, offY: scroll.offY,
+      field: SIDE ? "side" : undefined,
     };
   }
 
@@ -600,6 +633,9 @@
     const d = B[selB];
     // 高さ可変 (塔) はポインタのマスが土台 (一番下の段) になる
     if (d.hs) return [x - ((d.w - 1) >> 1), y - (heightNow() - 1)];
+    // 横視点: 床に立つものはポインタのマスが一番下の段、天井から下がるものは一番上の段
+    if (d.floor && d.kind === "fixed") return [x - ((d.w - 1) >> 1), y - (d.h - 1)];
+    if (d.ceil) return [x - ((d.w - 1) >> 1), y];
     return [x - ((d.w - 1) >> 1), y - ((d.h - 1) >> 1)];
   }
   // 高さ可変の建造物で選んでいる高さ (建造物ごと)
@@ -734,7 +770,15 @@
     }
     // 手動で置いたマスと、建造物の下の地形は残す
     if (mode === "regen") solver.eraseMany(solver.cells.reduce((a, v, i) => (v >= 0 && !solver.manual[i] && layer.b[i] < 0 && a.push(i), a), []));
-    if (P.border.checked && ROOT >= 0) {
+    if (P.border.checked && SIDE) {
+      // 横視点: 上の行を空、下の行を深層岩にする
+      const deep = T.findIndex((t) => t.id === "deep");
+      for (let x = 0; x < W; x++) {
+        if (solver.can(x, ROOT)) solver.place(x, ROOT, 0, false);
+        const i = (H - 1) * W + x;
+        if (deep >= 0 && solver.can(i, deep)) solver.place(i, deep, 0, false);
+      }
+    } else if (P.border.checked && ROOT >= 0) {
       for (let x = 0; x < W; x++)
         for (const y of [0, H - 1]) {
           const i = y * W + x;
@@ -831,7 +875,7 @@
     // 建造物
     const bbox = $("bpalette");
     bbox.innerHTML = "";
-    const KIND = { fixed: (d) => (d.hs ? `${d.w}×${d.hs[0]}〜${d.hs[1]}` : `${d.w}×${d.h}`), line: () => "線", area: () => "面" };
+    const KIND = { fixed: (d) => (d.hs ? `${d.w}×${d.hs[0]}〜${d.hs[1]}` : `${d.w}×${d.h}`), line: (d) => (d.axis === "v" ? "縦" : d.axis === "h" ? "横" : "線"), area: () => "面" };
     B.forEach((d, bi) => {
       const row = document.createElement("div");
       row.className = "row b";
@@ -839,14 +883,16 @@
       sw.width = sw.height = 32;
       const g = sw.getContext("2d");
       g.imageSmoothingEnabled = false;
-      if (imgs[sel]) g.drawImage(imgs[sel], 128, 0, 32, 32, 0, 0, 32, 32);
+      // 横視点は空 (水の中のものは水) を背景に
+      const bg = SIDE ? (d.on.includes(ROOT) ? ROOT : d.on[0]) : sel;
+      if (imgs[bg]) g.drawImage(imgs[bg], 128, 0, 32, 32, 0, 0, 32, 32);
       if (bimgs[bi]) {
         if (d.kind === "fixed") {
           // 縦横比を保って 32x32 に収める (高さ可変は一番低い絵)
           const h = d.hs ? d.hs[0] : d.h, k = Math.min(32 / (d.w * 32), 32 / (h * 32));
           g.drawImage(bimgs[bi], 0, 0, d.w * 32, h * 32, (32 - d.w * 32 * k) / 2, 32 - h * 32 * k, d.w * 32 * k, h * 32 * k);
         }
-        else if (d.kind === "line") g.drawImage(bimgs[bi], 10 * 32, 0, 32, 32, 0, 0, 32, 32);
+        else if (d.kind === "line") g.drawImage(bimgs[bi], lineIcon(d) * 32, 0, 32, 32, 0, 0, 32, 32);
         else {
           for (let q = 0; q < 4; q++) {
             // 1マスだけの面 = 凸角 ①〜④
@@ -862,7 +908,7 @@
       const kind = document.createElement("small");
       kind.textContent = " " + KIND[d.kind](d);
       name.appendChild(kind);
-      name.title = "置ける地形: " + T.filter((_, t) => layer.allows(bi, t)).map((t) => t.name).join("・");
+      name.title = "置ける地形: " + onNames(bi) + (d.kind === "fixed" && d.floor ? "\n床: " + d.floor.map((t) => T[t].name).join("・") : "") + (d.ceil ? "\n天井: " + d.ceil.map((t) => T[t].name).join("・") : "");
       // 自動配置の頻度 (倍率)。自動で置かないもの (城壁) は出さない
       const rg = document.createElement("input"), wv = document.createElement("span");
       wv.className = "w";
@@ -958,6 +1004,7 @@
   function serialize() {
     return {
       v: 1,
+      mode: MODE,
       W,
       H,
       ids: T.map((t) => t.id),
@@ -979,6 +1026,7 @@
   }
   function deserialize(o) {
     if (!o || o.v !== 1) throw new Error("形式が違います");
+    if ((o.mode || "world") !== MODE) throw new Error("モードが違います");
     const map = (o.ids || []).map((id) => T.findIndex((t) => t.id === id));
     W = o.W;
     H = o.H;
@@ -1034,6 +1082,16 @@
       } catch (e) {}
     }, 400);
   }
+  function switchMode(m) {
+    if (m === MODE) return;
+    stopGen();
+    try {
+      localStorage.setItem(STORE, JSON.stringify(serialize()));
+      localStorage.setItem(MODE_KEY, m);
+    } catch (e) {}
+    location.hash = m;
+    location.reload();
+  }
   function download(blob, name) {
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
@@ -1062,7 +1120,7 @@
       stopGen();
       pushUndo();
       const n = layer.autoPlace(solver.cells, { seed: (Math.random() * 1e9) | 0 });
-      msg(n ? `建造物を ${n} か所に置きました` : "置ける場所がありません");
+      msg(n ? `${SIDE ? "置き物" : "建造物"}を ${n} か所に置きました` : "置ける場所がありません");
       flushDirty();
     };
     $("bClearB").onclick = () => {
@@ -1091,8 +1149,11 @@
       updateCount();
       scheduleSave();
     };
-    $("bPng").onclick = () => mapCv.toBlob((b) => download(b, `map_${W}x${H}_${stamp()}.png`));
-    $("bSave").onclick = () => download(new Blob([JSON.stringify(serialize())], { type: "application/json" }), `map_${stamp()}.json`);
+    const pre = SIDE ? "stage" : "map";
+    $("bPng").onclick = () => mapCv.toBlob((b) => download(b, `${pre}_${W}x${H}_${stamp()}.png`));
+    $("bSave").onclick = () => download(new Blob([JSON.stringify(serialize())], { type: "application/json" }), `${pre}_${stamp()}.json`);
+    $("mWorld").onclick = () => switchMode("world");
+    $("mSide").onclick = () => switchMode("side");
     $("bLoad").onclick = () => $("fileIn").click();
     $("fileIn").onchange = async (e) => {
       const f = e.target.files[0];
@@ -1100,6 +1161,12 @@
       if (!f) return;
       try {
         const o = JSON.parse(await f.text());
+        // 別のモードのマップなら、そちらの保存先に入れて切り替える
+        if (o && o.v === 1 && (o.mode || "world") !== MODE) {
+          localStorage.setItem(STORES[o.mode || "world"], JSON.stringify(o));
+          switchMode(o.mode || "world");
+          return;
+        }
         stopGen();
         pushUndo();
         deserialize(o);
@@ -1295,7 +1362,24 @@
     requestAnimationFrame(frame);
   }
 
+  /** モードに合わせて文言を変える */
+  function applyMode() {
+    $("mWorld").classList.toggle("on", !SIDE);
+    $("mSide").classList.toggle("on", SIDE);
+    document.title = SIDE ? "WFCステージ" : "WFCマップ";
+    if (!SIDE) return;
+    $("sectB").textContent = "置き物";
+    $("bAutoB").title = "今の地形に合わせて置き物を撒く";
+    $("lblBorder").lastChild.textContent = "上を空・下を深層岩に";
+    $("lblBld").lastChild.textContent = "置き物も自動配置";
+    $("lblBld").title = "生成・スクロールで現れた場所に置き物も自動で置く";
+  }
+
   async function init() {
+    applyMode();
+    try {
+      localStorage.setItem(MODE_KEY, MODE);
+    } catch (e) {}
     await loadImages();
     buildPalette();
     bindUI();
@@ -1321,6 +1405,6 @@
     requestAnimationFrame(frame);
   }
   // コンソールからいじれるように
-  window.mapApp = { solver, layer, T, B, view: () => ({ zoom, ox, oy, W, H }), setZoom, fit, select, selectB, scrollMap };
+  window.mapApp = { mode: MODE, solver, layer, T, B, view: () => ({ zoom, ox, oy, W, H }), setZoom, fit, select, selectB, scrollMap };
   init();
 })();

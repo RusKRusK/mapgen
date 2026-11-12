@@ -46,6 +46,9 @@ label { white-space: nowrap; }
 }
 #bar .sep { width: 1px; height: 18px; background: var(--line); margin: 0 4px; }
 #bar .chk { display: inline-flex; align-items: center; }
+.seg { display: inline-flex; }
+.seg button + button { margin-left: -1px; }
+.seg button.on { position: relative; background: #44444a; border-color: var(--sel); color: var(--sel); }
 #zoomLabel { display: inline-block; width: 42px; text-align: center; }
 #bGen.running { color: var(--warn); }
 

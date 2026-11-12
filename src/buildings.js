@@ -9,6 +9,13 @@
 //   fixed: シートの part の位置を切り出す (高さ可変は高さごとの絵が横に並ぶ)
 //   line : 上下左右のつながり mask (N1|E2|S4|W8) の位置を切り出す (lineMask)
 //   area : 地形と同じ4分割オートタイル (隣が同じ建造物ならつながる)
+//
+// 横視点用の項目:
+//   floor: fixed は足場の一番下の段の真下 (各列) がこのどれかでないと置けない (木・宝箱など床に立つもの)。
+//          line では自動配置で「足場になる地形」として使う (はしごをかける崖、つたを垂らす天井、吊り橋の両岸)
+//   ceil : 足場の一番上の段の真上がこのどれか (鍾乳石・コウモリなど天井から下がるもの)
+//   axis : line のつながる向きを "v" (縦: はしご・つた) / "h" (横: 吊り橋) に限る
+//   auto.mode: line の自動配置のしかた。"ladder" 崖の下から上まで / "vine" 天井から垂らす / "span" 谷に渡す
 (function (root, factory) {
   const m = factory();
   if (typeof module === "object" && module.exports) module.exports = m;
@@ -36,6 +43,8 @@
       this.freq = defs.map(() => 1);
       this.onMask = defs.map((d) => bitsOf(d.on));
       this.nearMask = defs.map((d) => bitsOf(d.near));
+      this.floorMask = defs.map((d) => bitsOf(d.floor));
+      this.ceilMask = defs.map((d) => bitsOf(d.ceil));
       this.mark = mark || (() => {});
       this.resize(W, H);
     }
@@ -91,6 +100,7 @@
           if (this.b[k] >= 0) return { ok: false, why: "ほかの建造物があります" };
           if (this.needsTerrain(bi, j, h) && !this.allows(bi, cells[k])) return { ok: false, why: "地形が合いません" };
         }
+      if (d.kind === "fixed" && !this.supported(bi, x, y, d.w, h, cells)) return { ok: false, why: this.floorMask[bi] ? "下に床が要ります" : "上に天井が要ります" };
       if (this.nearMask[bi]) {
         let found = false;
         for (let j = -1; j <= h && !found; j++)
@@ -103,6 +113,17 @@
         if (!found) return { ok: false, why: "水辺にしか置けません" };
       }
       return { ok: true, why: "" };
+    }
+
+    /** floor / ceil の条件を満たすか (盤面の外は満たさない) */
+    supported(bi, x, y, w, h, cells) {
+      const W = this.W, H = this.H, fm = this.floorMask[bi], cm = this.ceilMask[bi];
+      const hit = (m, c) => c >= 0 && ((m >>> c) & 1) === 1;
+      for (let i = 0; i < w; i++) {
+        if (fm && (y + h >= H || !hit(fm, cells[(y + h) * W + x + i]))) return false;
+        if (cm && (y - 1 < 0 || !hit(cm, cells[(y - 1) * W + x + i]))) return false;
+      }
+      return true;
     }
 
     /**
@@ -163,15 +184,40 @@
     /** 地形が合わなくなった建造物を消す。list: 調べるセル。消したら true */
     prune(list, cells) {
       let any = false;
-      for (const i of list) {
-        const bi = this.b[i];
-        if (bi < 0 || cells[i] < 0 || this.allows(bi, cells[i])) continue;
-        // 高さ可変は土台の段だけ見る
-        if (this.D[bi].hs) {
-          const { local, h } = this.partInfo(bi, this.part[i]);
-          if (!this.needsTerrain(bi, (local / this.D[bi].w) | 0, h)) continue;
+      const W = this.W, seen = new Set();
+      for (const i0 of list) {
+        // 床・天井の条件があるので、変わったセルの上下の建造物も調べる
+        for (const i of [i0, i0 - W, i0 + W]) {
+          if (i < 0 || i >= this.b.length || seen.has(i)) continue;
+          seen.add(i);
+          const bi = this.b[i];
+          if (bi < 0) continue;
+          if (cells[i] >= 0 && !this.allows(bi, cells[i])) {
+            // 高さ可変は土台の段だけ見る
+            const { local, h } = this.partInfo(bi, this.part[i]);
+            if (!this.D[bi].hs || this.needsTerrain(bi, (local / this.D[bi].w) | 0, h)) {
+              any = this.removeAt(i) || any;
+              continue;
+            }
+          }
+          if ((this.floorMask[bi] || this.ceilMask[bi]) && this.D[bi].kind === "fixed") {
+            let x0 = 1e9, y0 = 1e9, x1 = -1, y1 = -1;
+            for (const c of this.cellsOf(i)) {
+              const cx = c % W, cy = (c / W) | 0;
+              x0 = Math.min(x0, cx);
+              y0 = Math.min(y0, cy);
+              x1 = Math.max(x1, cx);
+              y1 = Math.max(y1, cy);
+            }
+            // 床・天井のセルが未確定のあいだは判断しない
+            let pending = false;
+            for (let x = x0; x <= x1; x++) {
+              if (this.floorMask[bi] && y1 + 1 < this.H && cells[(y1 + 1) * W + x] < 0) pending = true;
+              if (this.ceilMask[bi] && y0 > 0 && cells[(y0 - 1) * W + x] < 0) pending = true;
+            }
+            if (!pending && !this.supported(bi, x0, y0, x1 - x0 + 1, y1 - y0 + 1, cells)) any = this.removeAt(i) || any;
+          }
         }
-        any = this.removeAt(i) || any;
       }
       return any;
     }
@@ -180,6 +226,13 @@
     lineMask(x, y, cells) {
       const bi = this.at(x, y), W = this.W, H = this.H;
       const same = (dx, dy) => this.at(x + dx, y + dy) === bi;
+      const axis = this.D[bi].axis;
+      if (axis) {
+        // 縦 / 横だけ。その向きの隣が同じ建造物ならつながる
+        let m = 0;
+        for (const [dx, dy, bit] of DIRS) if ((axis === "v" ? dx === 0 : dy === 0) && same(dx, dy)) m |= bit;
+        return m;
+      }
       if (this.D[bi].id !== "bridge") {
         let m = 0;
         for (const [dx, dy, bit] of DIRS) if (same(dx, dy)) m |= bit;
@@ -323,16 +376,22 @@
       D.forEach((d, bi) => {
         if (d.kind !== "fixed" || !d.auto) return;
         const p = this.freq[bi] / d.auto.per;
+        const fm = this.floorMask[bi], cm = this.ceilMask[bi];
         for (const i of region) {
-          if (!this.allows(bi, cells[i]) || rng() >= p) continue;
+          if (!this.allows(bi, cells[i])) continue;
+          // 床に立つものは床のすぐ上のセル、天井から下がるものは天井のすぐ下のセルだけを起点にする
+          if (fm && !(i + W < W * H && cells[i + W] >= 0 && (fm >>> cells[i + W]) & 1)) continue;
+          if (cm && !(i - W >= 0 && cells[i - W] >= 0 && (cm >>> cells[i - W]) & 1)) continue;
+          if (rng() >= p) continue;
           // 足場がこのセルを含むように起点をずらして試す (端の1列だけが対象でも大きいものを置ける)
           // 高さ可変はランダムな高さ。そのセルが土台 (一番下の段) になるように置く
           const v = d.hs ? Math.floor(rng() * (d.hs[1] - d.hs[0] + 1)) : undefined, h = this.heightOf(bi, v);
-          const rows = d.hs ? 1 : h;
+          const rows = d.hs || fm || cm ? 1 : h;
           let x = -1, y = -1;
           const ox = Math.floor(rng() * d.w), oy = Math.floor(rng() * rows);
           for (let k = 0; k < d.w * rows && x < 0; k++) {
-            const tx = (i % W) - ((ox + k) % d.w), ty = ((i / W) | 0) - (d.hs ? h - 1 : (oy + ((k / d.w) | 0)) % h);
+            const iy = (i / W) | 0, tx = (i % W) - ((ox + k) % d.w);
+            const ty = cm ? iy : d.hs || fm ? iy - (h - 1) : iy - ((oy + ((k / d.w) | 0)) % h);
             if (okRect(tx, ty, d.w, h) && far(bi, tx + d.w / 2, ty + h / 2) && this.place(bi, tx, ty, cells, v)) {
               x = tx;
               y = ty;
@@ -345,6 +404,54 @@
             const fp = [];
             for (let j = 0; j < h; j++) for (let k = 0; k < d.w; k++) fp.push((y + j) * W + x + k);
             towns.push(fp);
+          }
+        }
+      });
+
+      // 横視点の線状: はしご・つた・吊り橋
+      const isAir = (bi, x, y) => x >= 0 && y >= 0 && x < W && y < H && this.b[y * W + x] < 0 && this.allows(bi, cells[y * W + x]) && ok(y * W + x);
+      const solidAt = (bi, x, y) => x >= 0 && y >= 0 && x < W && y < H && cells[y * W + x] >= 0 && ((this.floorMask[bi] >>> cells[y * W + x]) & 1) === 1;
+      D.forEach((d, bi) => {
+        if (d.kind !== "line" || !d.auto || !d.auto.mode) return;
+        const p = this.freq[bi] / d.auto.per;
+        const put = (list) => {
+          const cx = list.reduce((a, c) => a + c[0], 0) / list.length + 0.5, cy = list.reduce((a, c) => a + c[1], 0) / list.length + 0.5;
+          if (!far(bi, cx, cy)) return;
+          for (const [x, y] of list) this.place(bi, x, y, cells);
+          placed.push({ b: bi, cx, cy });
+          count++;
+        };
+        for (const i of region) {
+          const x = i % W, y = (i / W) | 0;
+          if (!isAir(bi, x, y)) continue;
+          if (d.auto.mode === "ladder") {
+            // 床の上で、横が崖。崖の上 (横の列が空いたところ) まで登れるように
+            if (!solidAt(bi, x, y + 1)) continue;
+            for (const dir of [-1, 1]) {
+              let k = 0;
+              while (k < 8 && solidAt(bi, x + dir, y - k) && isAir(bi, x, y - k)) k++;
+              if (k < 2 || k >= 8 || !isAir(bi, x + dir, y - k) || !isAir(bi, x, y - k)) continue;
+              if (rng() >= p) continue;
+              const list = [];
+              for (let j = 0; j < k; j++) list.push([x, y - j]);
+              put(list);
+              break;
+            }
+          } else if (d.auto.mode === "vine") {
+            // 天井から垂らす
+            if (!solidAt(bi, x, y - 1) || rng() >= p) continue;
+            const n = 2 + Math.floor(rng() * 4), list = [];
+            for (let j = 0; j < n && isAir(bi, x, y + j) && !solidAt(bi, x, y + j + 1); j++) list.push([x, y + j]);
+            if (list.length) put(list);
+          } else if (d.auto.mode === "span") {
+            // 左が床の端 (下が地面) で、右へ谷を渡った先も同じ高さの床
+            if (!solidAt(bi, x - 1, y + 1) || !isAir(bi, x - 1, y) || solidAt(bi, x, y + 1)) continue;
+            let n = 0;
+            while (n < 9 && isAir(bi, x + n, y) && !solidAt(bi, x + n, y + 1)) n++;
+            if (n < 2 || n >= 9 || !solidAt(bi, x + n, y + 1) || !isAir(bi, x + n, y) || rng() >= p) continue;
+            const list = [];
+            for (let j = 0; j < n; j++) list.push([x + j, y]);
+            put(list);
           }
         }
       });
